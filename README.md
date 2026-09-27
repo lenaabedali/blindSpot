@@ -1,15 +1,15 @@
 # BlindSpot
 
 A Jac-native graph of your codebase's call structure, walked to find
-functions with **untested lines that are still reachable** (real risk,
-not dead code) — exposed as an MCP tool any AI coding assistant can call.
+functions with **untested lines that are still called by other code**
+(real risk, not dead code) — exposed as an MCP tool any AI coding assistant can call.
 
 Built for JacHacks A2Tech (Sept 26-27, 2026).
 
 ## Architecture
 
 ```
-   AI client (Claude Code / Cursor / Baz)
+   AI client (Claude Code, or any MCP client)
               |  MCP over stdio (a private pipe, not the network)
               v
      mcp_server.py  (Python, MCP SDK)
@@ -26,17 +26,18 @@ Built for JacHacks A2Tech (Sept 26-27, 2026).
   ran, `git log` for each file's last editor.
 - **`main.sv.jac`** — the graph. `Function` nodes and `Calls` edges, built
   in one pass by the `BuildGraph` walker; the `RiskyUncovered` walker
-  finds untested code that other code actually depends on, and
-  `NarratedRiskReport` adds a Gemini review comment.
+  finds untested code that other code actually depends on,
+  `NarratedRiskReport` adds a Gemini review comment, and `TriageRisks`
+  runs the Gemini triage agent (see below).
 - **`ingest.py`** — the thin Python loader and CLI around the two Jac
   modules.
 - **`mcp_server.py`** — a thin MCP server that exposes the scan as tools.
 - **`blindspot_tests.jac`** — unit tests (`jac test blindspot_tests.jac`);
   Gemini is replaced by `MockLLM`, so no credentials are needed.
 
-**No server, no open port.** Your AI client launches `mcp_server.py` and
-talks to it over stdio; the Jac graph runs inside that same process.
-Nothing on your network can connect to it.
+**No network server, no open port.** Your AI client launches
+`mcp_server.py` itself and talks to it over stdio; the Jac graph runs
+inside that same process. Nothing on your network can connect to it.
 
 ## Requirements
 
@@ -140,6 +141,9 @@ Keep that in mind before scanning private code.
 ```bash
 # one-time: your own Google account + a GCP project with Vertex AI enabled
 gcloud auth application-default login
+gcloud config set project YOUR_PROJECT_ID
+gcloud auth application-default set-quota-project YOUR_PROJECT_ID
+gcloud services enable aiplatform.googleapis.com
 pip install google-cloud-aiplatform   # Vertex AI SDK, needed only for narration / triage
 
 python ingest.py /path/to/target/repo /tmp/coverage.json --narrate
@@ -158,15 +162,17 @@ Jac's `by llm(tools=[...])` it can call two read-only tools:
 
 It decides for itself which tools to call, then returns a priority
 (high / medium / low) and a one-line reason per function, grounded in what
-the code actually does. For example, on pallets/click it moves trivial
-`isatty` passthroughs down to low even though many places call them.
+the code actually does. For example, in our test run on pallets/click it
+moved trivial `isatty` passthroughs down to low even though many places
+call them. (Gemini's priorities and wording can vary between runs; the
+findings themselves don't.)
 If Gemini skips a function, BlindSpot sends just the missing ones back
 (up to 3 rounds), and it drops any function name Gemini made up.
 
 **Safety:** the tools only read from data BlindSpot already holds in
 memory — the flagged functions and their callers. The agent never passes
 a file path, so it can't read anything else, and it can't write files or
-run commands. The number of tool calls per round is capped. If Gemini
+run commands. Each round is capped at 25 agent steps. If Gemini
 fails, you get a clear "triage unavailable" message and the findings still
 come back.
 
