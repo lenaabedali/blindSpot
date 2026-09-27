@@ -137,7 +137,7 @@ pip install google-cloud-aiplatform   # Vertex AI SDK, needed only for narration
 python ingest.py /path/to/target/repo /tmp/coverage.json --narrate
 ```
 
-`glob llm` in `main.sv.jac` targets `vertex_ai/gemini-2.0-flash-001`.
+`glob llm` in `main.sv.jac` targets `vertex_ai/gemini-2.5-flash`.
 
 ## Status
 
