@@ -15,6 +15,7 @@ import from pathlib { Path }
 obj FunctionInfo {
     has qualified_name: str,
         file_path: str,
+        def_line: int,  # the `def` line
         body_start: int,  # first line INSIDE the function (not the `def`)
         end_lineno: int,
         class_name: str,  # enclosing class ("" if not a method)
@@ -94,6 +95,7 @@ def visit_defs(
             found.append(FunctionInfo(
                 qualified_name=qname,
                 file_path=str(py_file),
+                def_line=child.lineno,
                 # The `def` line itself always "runs" when the file is
                 # imported, so only the body tells us what tests ran.
                 body_start=child.body[0].lineno,
@@ -218,4 +220,27 @@ def collect(
         }
     }
     return (records, edges);
+}
+
+
+"""Source code of every function in the repo, by name, for the triage
+agent's read-only tool. Long functions are cut off at max_chars. Like
+collect(), a later definition of the same name replaces an earlier one."""
+def collect_sources(repo: Path, src_glob: str, max_chars: int = 4000) -> dict[str, str] {
+    sources: dict[str, str] = {};
+    for py_file in sorted(repo.glob(src_glob)) {
+        if not py_file.resolve().is_relative_to(repo) {
+            continue;
+        }
+        module_qualifier = str(py_file.relative_to(repo)).replace("/", ".").removesuffix(".py");
+        try {
+            lines = py_file.read_text().splitlines();
+        } except (ValueError, OSError) {
+            continue;
+        }
+        for f in extract_functions(py_file, module_qualifier) {
+            sources[f.qualified_name] = "\n".join(lines[f.def_line - 1:f.end_lineno])[:max_chars];
+        }
+    }
+    return sources;
 }
