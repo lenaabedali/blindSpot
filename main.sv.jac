@@ -188,3 +188,132 @@ walker:pub NarratedRiskReport(RiskyUncovered) {
         }
     }
 }
+
+
+# ---------------------------------------------------------------------------
+# Triage agent: Gemini investigates each risky function with read-only
+# tools, then decides how urgently it needs tests and why.
+# ---------------------------------------------------------------------------
+
+# What the agent's tools may read. Filled in by TriageRisks right before the
+# LLM call, from data BlindSpot already has in memory -- the agent never
+# passes a file path, so it can't read anything else.
+glob triage_sources: dict[str, str] = {},
+     triage_callers: dict[str, list[str]] = {};
+
+"""Read-only tool: the source code of one function."""
+def read_function_source(qualified_name: str) -> str {
+    return triage_sources.get(
+        qualified_name, f"No source available for {qualified_name}."
+    );
+}
+sem read_function_source = "Return the Python source code of one function from the scanned repo (read-only). Use it to see what the function actually does.";
+sem read_function_source.qualified_name = "Full function name exactly as it appears in the findings, e.g. src.pkg.module.Class.method.";
+
+"""Read-only tool: which functions call this one."""
+def list_callers(qualified_name: str) -> list[str] {
+    return triage_callers.get(qualified_name, []);
+}
+sem list_callers = "Return the full names of the functions that call the given function (read-only). Use it to judge how much other code depends on it.";
+sem list_callers.qualified_name = "Full function name exactly as it appears in the findings.";
+
+obj Triage {
+    has function: str;
+    has priority: str;
+    has reason: str;
+}
+sem Triage.function = "Full function name, exactly as given in the findings.";
+sem Triage.priority = "How urgently this function needs tests. One of: high, medium, low.";
+sem Triage.reason = "One sentence explaining the priority, grounded in what the code does and who calls it.";
+
+def triage_findings(findings_json: str) -> list[Triage] by llm(
+    tools=[read_function_source, list_callers], max_react_iterations=25
+);
+sem triage_findings = "You are reviewing functions that other code calls but tests don't fully cover. Investigate before judging: you MUST call read_function_source for EVERY finding before giving your answer (never judge a function you haven't read), and call list_callers when knowing who depends on it would change the priority. Then decide how urgently it needs tests (high, medium or low) with a one-sentence reason based on the code itself. Error handling, security, data changes and widely used helpers matter more than trivial getters or repr methods. A partly tested function (fully_untested=false) is only partly untested; say so accurately. Return one Triage per finding, most urgent first.";
+sem triage_findings.findings_json = "JSON-encoded list of findings, each with function, file, called_by_count, untested_lines, total_lines, fully_untested.";
+
+walker:pub TriageRisks(RiskyUncovered) {
+    """Same graph walk as RiskyUncovered, then a Gemini agent triages the
+    most urgent findings using the read-only tools above."""
+    has sources: dict[str, str] = {},
+        max_functions: int = 10,
+        callers_of: dict[str, list[str]] = {};
+
+    can note_callers with Function entry {
+        self.callers_of[here.qualified_name] = [
+            (c as Function).qualified_name for c in [here <-:Calls:<-]
+        ];
+    }
+
+    override can finish with Root exit {
+        global triage_sources, triage_callers;
+        self.findings = rank_findings(self.findings);
+        top = self.findings[:self.max_functions];
+        # The agent may read the flagged functions and the code that calls them.
+        readable: set[str] = set();
+        for f in top {
+            name = str(f["function"]);
+            readable.add(name);
+            readable.update(self.callers_of.get(name, []));
+        }
+        triage_sources = {n: self.sources[n] for n in readable if n in self.sources};
+        triage_callers = {
+            str(f["function"]): self.callers_of.get(str(f["function"]), []) for f in top
+        };
+        # Leave people's names (last_editor) out of what goes to Google.
+        to_send = [
+            {"function": f["function"], "file": f["file"],
+             "called_by_count": f["called_by_count"],
+             "untested_lines": f["untested_lines"],
+             "total_lines": f["total_lines"],
+             "fully_untested": f["fully_untested"]}
+            for f in top
+        ];
+        if not top {
+            report {"findings": self.findings, "triage": [], "summary": "No risky uncovered functions found."};
+        } else {
+            try {
+                # Gemini sometimes stops early and skips functions, so send the
+                # missing ones back for another round (up to 3 rounds). Only
+                # keep answers about functions we actually asked about.
+                judged: dict[str, Triage] = {};
+                pending = to_send;
+                for _ in range(3) {
+                    if not pending {
+                        break;
+                    }
+                    for t in triage_findings(json.dumps(pending)) {
+                        if t.function in triage_callers and t.function not in judged {
+                            judged[t.function] = t;
+                        }
+                    }
+                    pending = [f for f in to_send if f["function"] not in judged];
+                }
+                order = {"high": 0, "medium": 1, "low": 2};
+                ranked = sorted(
+                    judged.values(),
+                    key=lambda t: Triage : order.get(t.priority.lower(), 3)
+                );
+                report {
+                    "findings": self.findings,
+                    "triage": [
+                        {"function": t.function, "priority": t.priority, "reason": t.reason}
+                        for t in ranked
+                    ],
+                    "triaged_count": len(judged),
+                };
+            } except Exception as e {
+                # Log details server-side only, like NarratedRiskReport.
+                print(f"TriageRisks: LLM call failed: {type(e).__name__}");
+                report {
+                    "findings": self.findings,
+                    "triage": [],
+                    "summary": "Triage unavailable: the Gemini call failed. Make sure "
+                        "you've run `gcloud auth application-default login` against a "
+                        "Google Cloud project with the Vertex AI API enabled. "
+                        "(RiskyUncovered works without this.)",
+                };
+            }
+        }
+    }
+}
