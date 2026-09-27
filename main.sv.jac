@@ -9,7 +9,7 @@ ingest.py / mcp_server.py -- no web server involved.
 import json;
 import from byllm.lib { Model }
 
-glob llm: Model = Model(model_name="vertex_ai/gemini-2.0-flash-001");
+glob llm: Model = Model(model_name="vertex_ai/gemini-2.5-flash");
 
 node Function {
     has qualified_name: str,
