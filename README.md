@@ -1,7 +1,7 @@
 # BlindSpot
 
 A Jac-native graph of your codebase's call structure, walked to find
-functions that are **uncovered by tests but still reachable** (real risk,
+functions with **untested lines that are still reachable** (real risk,
 not dead code) — exposed as an MCP tool any AI coding assistant can call.
 
 Built for JacHacks A2Tech (Sept 26-27, 2026).
@@ -13,18 +13,26 @@ Built for JacHacks A2Tech (Sept 26-27, 2026).
               |  MCP over stdio (a private pipe, not the network)
               v
      mcp_server.py  (Python, MCP SDK)
-              |  in-process: builds the graph and spawns Jac walkers
+              |  in-process
               v
-     main.sv.jac  (Jac: node/edge/walker graph)
+     ingest.py  (Python: checks inputs, loads the Jac modules)
+              |
+              v
+     scanner.jac  (Jac: reads the repo)  -->  main.sv.jac  (Jac: graph + walkers)
 ```
 
-- **`main.sv.jac`** — the graph. `Function` nodes, `Calls` edges, and a
-  `RiskyUncovered` walker that traverses the call graph to find untested
-  code that other code actually depends on.
-- **`ingest.py`** — reads a repo (Python `ast` for functions and calls,
-  `coverage.json` for what's tested, `git log` for last editor), loads it
-  into the Jac graph, and runs the walker.
+- **`scanner.jac`** — reads a repo: Python `ast` for functions and calls
+  (the scanned code is never run), `coverage.json` for which lines tests
+  ran, `git log` for each file's last editor.
+- **`main.sv.jac`** — the graph. `Function` nodes and `Calls` edges, built
+  in one pass by the `BuildGraph` walker; the `RiskyUncovered` walker
+  finds untested code that other code actually depends on, and
+  `NarratedRiskReport` adds a Gemini review comment.
+- **`ingest.py`** — the thin Python loader and CLI around the two Jac
+  modules.
 - **`mcp_server.py`** — a thin MCP server that exposes the scan as tools.
+- **`blindspot_tests.jac`** — unit tests (`jac test blindspot_tests.jac`);
+  Gemini is replaced by `MockLLM`, so no credentials are needed.
 
 **No server, no open port.** Your AI client launches `mcp_server.py` and
 talks to it over stdio; the Jac graph runs inside that same process.
@@ -76,16 +84,33 @@ Tools:
 - `find_risky_uncovered_functions(repo_path, coverage_json_path, src_glob)`
 - `get_narrated_risk_report(repo_path, coverage_json_path, src_glob)` — adds a Gemini review comment (see below)
 
-Verified end-to-end against a real repo (pallets/markupsafe): 53 functions,
-38 call edges from real git history + a real pytest/coverage run;
-correctly surfaced 6 functions with zero test coverage that are still
-called from elsewhere (e.g. `Markup.escape`, called from 10 places,
-untested) while excluding covered code and genuinely dead code.
+Each finding reports how much of the function is untested
+(`untested_lines` of `total_lines`, counting only real code lines in the
+body) and whether it is `fully_untested`. Fully untested functions are
+listed first, then the ones the most other code calls.
 
-**Known limitation:** call edges are matched by short function name, not
-full scope resolution — a name collision (two unrelated functions both
-called `escape`) can produce a false edge. Fine for a hackathon demo,
-proper scope resolution would be the first thing to harden.
+Verified end-to-end against real repos, and cross-checked against an
+independent re-implementation of the same rules:
+
+- **pallets/markupsafe** (real git history + a real pytest/coverage run):
+  53 functions, 20 call edges, 3 findings: `Markup.join` and
+  `Markup.replace` have no test coverage at all, and `Markup.escape` is
+  called from 10 places but 1 of its 4 code lines never runs under the
+  tests. Fully covered code and dead code are excluded.
+- **pallets/click** (a larger repo): 534 functions, 1021 call edges,
+  99 findings, scanned in about 2 seconds.
+
+**How calls are matched:** by function name. `self.save()` inside a class
+links to that class's own `save` method. Calls to special methods like
+`__init__` or `__repr__` are not matched by name, since a call such as
+`super().__init__()` doesn't say which class's method runs. When a name is
+defined more than once (e.g. `@overload` stubs), the last definition — the
+one Python actually uses — is the one analysed.
+
+**Known limitation:** other method calls are matched by name only, without
+knowing the object's type — e.g. `stream.write(x)` links to every `write`
+method in the repo. Common method names can therefore produce false
+edges. Proper type-aware resolution would be the first thing to harden.
 
 ## Gemini narration (Vertex AI, for Best of Google)
 
