@@ -9,3 +9,9 @@ kind = "api-service"
 
 [dev-dependencies]
 watchdog = ">=3.0.0"
+
+[run]
+# BlindSpot rebuilds the graph from scratch on every scan and only does
+# simple walks, so Jac's topology index (which is rewritten on every new
+# edge) just slows building down: click scans in ~3s instead of ~35s.
+topology_index = false
