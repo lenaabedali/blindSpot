@@ -50,6 +50,18 @@ def get_narrated_risk_report(repo_path: str, coverage_json_path: str,
     return _scan(repo_path, coverage_json_path, src_glob, narrate=True)
 
 
+@mcp.tool()
+def triage_risky_functions(repo_path: str, coverage_json_path: str,
+                           src_glob: str = "src/**/*.py") -> dict:
+    """Same scan as find_risky_uncovered_functions, then a Gemini agent
+    (Vertex AI, via Jac's by llm) investigates the 10 most urgent findings:
+    it reads each function's source and its callers with read-only tools,
+    and returns a priority (high/medium/low) with a one-line reason for
+    each. Uses the Google Cloud login of whoever runs this server, and sends
+    those functions' source code to Gemini."""
+    return _scan(repo_path, coverage_json_path, src_glob, triage=True)
+
+
 if __name__ == "__main__":
     _load_graph()  # compile/load the Jac graph up front so the first call is fast
     mcp.run()
