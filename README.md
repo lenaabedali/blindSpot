@@ -31,7 +31,7 @@ Gemini 2.5 Flash on Vertex AI
 - **`mcp_server.py`** exposes the scan as three MCP tools.
 - **`blindspot_tests.jac`** holds the unit tests. Run them with `jac test blindspot_tests.jac`. Gemini is mocked, so no credentials are needed.
 
-> 🔒 **Network:** BlindSpot opens no ports. Your AI client launches `mcp_server.py` itself and talks to it over stdio, so nothing can connect in. The only outgoing traffic is to Gemini, and only for narration and triage.
+> **Network:** BlindSpot opens no ports. Your AI client launches `mcp_server.py` itself and talks to it over stdio, so nothing can connect in. The only outgoing traffic is to Gemini, and only for narration and triage.
 
 ---
 
@@ -70,7 +70,7 @@ python ingest.py /path/to/target/repo /tmp/coverage.json \
 # Add --narrate or --triage for the Gemini features.
 ```
 
-> ⚠️ The target must be a git repo, and `--src-glob` must stay inside it. It can't contain `..` or be an absolute path.
+> **Note:** the target must be a git repo, and `--src-glob` must stay inside it. It can't contain `..` or be an absolute path.
 
 ---
 
@@ -117,7 +117,7 @@ Results were cross-checked against an independent re-implementation of the same 
 
 Calls are matched by **function name**. `self.save()` links to that class's own `save`. Special methods such as `__init__` and `__repr__` are not matched by name, because a call like `super().__init__()` doesn't say which class's method runs. When a name is defined more than once, as with `@overload` stubs, the last definition wins, which matches Python's own behavior.
 
-> ⚠️ **Known limitation:** other method calls are matched by name only, not by object type. For example, `stream.write(x)` links to every `write` in the repo, which can create false edges. Type-aware resolution is the top improvement to make.
+> **Known limitation:** other method calls are matched by name only, not by object type. For example, `stream.write(x)` links to every `write` in the repo, which can create false edges. Type-aware resolution is the top improvement to make.
 
 ---
 
@@ -152,9 +152,9 @@ python ingest.py /path/to/target/repo /tmp/coverage.json --narrate
 
 The agent chooses its own tool calls, then returns a priority of high, medium or low and a one-line reason for each function. For example, in our test run on `pallets/click`, trivial `isatty` passthroughs were moved down to low even though many places call them. Priorities and wording can vary between runs, but the findings themselves don't. Functions Gemini skips are sent again, for up to 3 rounds, and any names it makes up are dropped.
 
-> 🛡️ **Safety:** the tools only read data already in memory, namely the flagged functions and their callers. There are no file paths, no writes and no commands. Each round is capped at 25 steps. If Gemini fails, you get a clear "triage unavailable" message and the findings still come back.
+> **Safety:** the tools only read data already in memory, namely the flagged functions and their callers. There are no file paths, no writes and no commands. Each round is capped at 25 steps. If Gemini fails, you get a clear "triage unavailable" message and the findings still come back.
 
-> ⚠️ **Only triage code you trust.** Comments in the scanned code could try to steer Gemini's answer. The agent can't act on them, because its tools are read-only, but treat output on untrusted repos with care.
+> **Only triage code you trust.** Comments in the scanned code could try to steer Gemini's answer. The agent can't act on them, because its tools are read-only, but treat output on untrusted repos with care.
 
 ```bash
 python ingest.py /path/to/target/repo /tmp/coverage.json --triage
@@ -164,10 +164,10 @@ python ingest.py /path/to/target/repo /tmp/coverage.json --triage
 
 ## Status
 
-- ✅ Graph model with `Function` nodes and `Calls` edges: verified
-- ✅ `RiskyUncovered` walker: verified end to end
-- ✅ MCP server: verified over stdio, with no open ports
-- ✅ Real repo scanning of AST, git log and coverage.json: verified on `markupsafe` and `click`
-- ✅ Gemini narration with `gemini-2.5-flash`: verified live, including from Claude Code, with a clean fallback without credentials
-- ✅ Triage agent: verified live on `markupsafe` and `click`, including from Claude Code
-- ✅ Unit tests with `jac test blindspot_tests.jac`: Gemini mocked, no credentials needed
+- Graph model with `Function` nodes and `Calls` edges: verified
+- `RiskyUncovered` walker: verified end to end
+- MCP server: verified over stdio, with no open ports
+- Real repo scanning of AST, git log and coverage.json: verified on `markupsafe` and `click`
+- Gemini narration with `gemini-2.5-flash`: verified live, including from Claude Code, with a clean fallback without credentials
+- Triage agent: verified live on `markupsafe` and `click`, including from Claude Code
+- Unit tests with `jac test blindspot_tests.jac`: Gemini mocked, no credentials needed
