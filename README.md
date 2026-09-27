@@ -2,7 +2,8 @@
 
 A Jac-native graph of your codebase's call structure, walked to find
 functions with **untested lines that are still called by other code**
-(real risk, not dead code) — exposed as an MCP tool any AI coding assistant can call.
+(real risk, not dead code) — exposed as MCP tools that AI coding assistants
+can call.
 
 Built for JacHacks A2Tech (Sept 26-27, 2026).
 
