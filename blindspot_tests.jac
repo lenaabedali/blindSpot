@@ -7,7 +7,7 @@ import main;
 import scanner;
 import tempfile;
 import from pathlib { Path }
-import from byllm.lib { MockLLM, Model }
+import from byllm.lib { MockLLM, MockToolCall, Model }
 import from jaclang.lib { destroy }
 
 
@@ -194,4 +194,82 @@ test "calls to special methods like __init__ are not matched by name" {
     source = "class A:\n    def __init__(self):\n        pass\n\nclass B(A):\n    def __init__(self):\n        super().__init__()\n";
     (_, edges) = scan_source(source, []);
     assert edges == [], f"super().__init__() should not link to every __init__, got {edges}";
+}
+
+
+test "triage agent reads code with its tool, then returns priorities" {
+    build_sample_graph();
+    answer = [
+        main.Triage(function="risky", priority="high", reason="Handles user input."),
+        main.Triage(function="partial", priority="low", reason="Only a repr."),
+    ];
+    # Fake Gemini: first it calls the read-only tool, then it answers (the
+    # agent loop asks once more for a final answer, hence `answer` twice).
+    main.llm = MockLLM(
+        model_name="mockllm",
+        config={"outputs": [
+            MockToolCall(tool=main.read_function_source, args={"qualified_name": "risky"}),
+            answer,
+            answer,
+        ]},
+    ) as Model;
+    out = (root spawn main.TriageRisks(sources={"risky": "def risky(): ..."})).reports[0];
+    triage = out["triage"] as list[dict[str, str]];
+    assert [t["function"] for t in triage] == ["risky", "partial"];
+    assert triage[0]["priority"] == "high";
+    assert triage[0]["reason"] == "Handles user input.";
+}
+
+
+test "triage falls back safely when Gemini fails" {
+    build_sample_graph();
+    main.llm = MockLLM(model_name="mockllm", config={"outputs": []}) as Model;
+    out = (root spawn main.TriageRisks()).reports[0];
+    assert out["triage"] == [];
+    assert str(out["summary"]).startswith("Triage unavailable");
+    assert len(out["findings"] as list) == 2, "findings must still come back";
+}
+
+
+test "triage agent can only read flagged functions and their callers" {
+    build_sample_graph();
+    main.llm = MockLLM(model_name="mockllm", config={"outputs": [[]]}) as Model;
+    root spawn main.TriageRisks(sources={
+        "risky": "RISKY SRC", "caller": "CALLER SRC", "safe": "SAFE SRC", "dead": "DEAD SRC"
+    });
+    assert main.read_function_source("risky") == "RISKY SRC";
+    assert main.read_function_source("caller") == "CALLER SRC", "callers are readable";
+    assert "No source" in main.read_function_source("safe"), "unflagged code must not be readable";
+    assert "No source" in main.read_function_source("dead");
+    assert "No source" in main.read_function_source("../../etc/passwd");
+    assert main.list_callers("risky") == ["caller"];
+}
+
+
+test "scanner collects each function's source, last definition wins" {
+    with tempfile.TemporaryDirectory() as tmp {
+        repo = Path(str(tmp)).resolve();
+        (repo / "m.py").write_text("def f():\n    return 1\n\ndef f():\n    return 2\n");
+        sources = scanner.collect_sources(repo, "*.py");
+        assert sources == {"m.f": "def f():\n    return 2"};
+        assert len(scanner.collect_sources(repo, "*.py", max_chars=5)["m.f"]) == 5;
+    }
+}
+
+
+test "triage asks again for functions Gemini skipped, ignores made-up ones" {
+    build_sample_graph();
+    first = [
+        main.Triage(function="partial", priority="low", reason="Tiny helper."),
+        main.Triage(function="not_a_real_function", priority="high", reason="Made up."),
+    ];
+    second = [main.Triage(function="risky", priority="high", reason="Parses input.")];
+    # Round 1 skips "risky"; round 2 is sent only "risky" and answers it.
+    main.llm = MockLLM(
+        model_name="mockllm", config={"outputs": [first, first, second, second]}
+    ) as Model;
+    out = (root spawn main.TriageRisks()).reports[0];
+    triage = out["triage"] as list[dict[str, str]];
+    assert [t["function"] for t in triage] == ["risky", "partial"], f"got {triage}";
+    assert out["triaged_count"] == 2;
 }
