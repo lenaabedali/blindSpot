@@ -83,6 +83,7 @@ BlindSpot venv:
 Tools:
 - `find_risky_uncovered_functions(repo_path, coverage_json_path, src_glob)`
 - `get_narrated_risk_report(repo_path, coverage_json_path, src_glob)` — adds a Gemini review comment (see below)
+- `triage_risky_functions(repo_path, coverage_json_path, src_glob)` — a Gemini agent investigates the top findings and ranks them (see below)
 
 Each finding reports how much of the function is untested
 (`untested_lines` of `total_lines`, counting only real code lines in the
@@ -126,18 +127,47 @@ own machine, via Application Default Credentials — nothing is read from
 source, committed, or shared. If that login isn't set up, you get a clear
 "narration unavailable" message instead of a crash.
 
-Note: this sends function names and file paths from the scanned repo to
-Google's Gemini API. Keep that in mind before scanning private code.
+Note: narration sends function names, file paths and line counts from
+the scanned repo to Google's Gemini API (never people's names). Triage
+(below) also sends the **source code** of the functions it investigates.
+Keep that in mind before scanning private code.
 
 ```bash
 # one-time: your own Google account + a GCP project with Vertex AI enabled
 gcloud auth application-default login
-pip install google-cloud-aiplatform   # Vertex AI SDK, needed only for narration
+pip install google-cloud-aiplatform   # Vertex AI SDK, needed only for narration / triage
 
 python ingest.py /path/to/target/repo /tmp/coverage.json --narrate
 ```
 
 `glob llm` in `main.sv.jac` targets `vertex_ai/gemini-2.5-flash`.
+
+## Triage agent (Gemini with tools)
+
+`TriageRisks` goes a step further than narration: a Gemini agent
+**investigates** the 10 most urgent findings before judging them. Through
+Jac's `by llm(tools=[...])` it can call two read-only tools:
+
+- `read_function_source(name)` — the function's source code
+- `list_callers(name)` — which functions call it (from the Jac graph)
+
+It decides for itself which tools to call, then returns a priority
+(high / medium / low) and a one-line reason per function, grounded in what
+the code actually does. For example, on pallets/click it moves trivial
+`isatty` passthroughs down to low even though many places call them.
+If Gemini skips a function, BlindSpot sends just the missing ones back
+(up to 3 rounds), and it drops any function name Gemini made up.
+
+**Safety:** the tools only read from data BlindSpot already holds in
+memory — the flagged functions and their callers. The agent never passes
+a file path, so it can't read anything else, and it can't write files or
+run commands. The number of tool calls per round is capped. If Gemini
+fails, you get a clear "triage unavailable" message and the findings still
+come back.
+
+```bash
+python ingest.py /path/to/target/repo /tmp/coverage.json --triage
+```
 
 ## Status
 
@@ -145,4 +175,6 @@ python ingest.py /path/to/target/repo /tmp/coverage.json --narrate
 - [x] RiskyUncovered walker — verified end-to-end
 - [x] MCP server — verified with a real MCP client over stdio; no network ports opened
 - [x] Real repo scanning (AST parse + git log + coverage.json → graph) — verified on pallets/markupsafe
-- [x] Gemini narration layer (Vertex AI) — falls back cleanly without credentials; needs live `gcloud auth` to run for real
+- [x] Gemini narration layer (Vertex AI, gemini-2.5-flash) — verified live, including from Claude Code; falls back cleanly without credentials
+- [x] Triage agent (Gemini + read-only tools) — verified live on markupsafe and click, including from Claude Code
+- [x] Unit tests — `jac test blindspot_tests.jac` (Gemini mocked with MockLLM, no credentials needed)
