@@ -21,26 +21,42 @@ def fresh_graph {
 }
 
 
-"""Build: caller -> risky (uncovered), caller -> safe (covered),
-plus dead (uncovered, called by nothing)."""
+"""Build: caller -> risky (fully untested), caller -> partial (1 of 4
+lines untested), caller -> safe (covered), plus dead (untested, called
+by nothing)."""
 def build_sample_graph {
     fresh_graph();
-    for (name, covered) in [("caller", True), ("risky", False), ("safe", True), ("dead", False)] {
+    # (name, untested lines, total lines)
+    for (name, untested, total) in [
+        ("caller", 0, 3), ("risky", 2, 2), ("partial", 1, 4), ("safe", 0, 5), ("dead", 3, 3)
+    ] {
         root spawn main.AddFunction(
-            qualified_name=name, file_path="m.py", covered=covered, last_editor="Ada"
+            qualified_name=name, file_path="m.py", covered=untested == 0,
+            untested_lines=untested, total_lines=total, last_editor="Ada"
         );
     }
-    root spawn main.AddCallEdge(caller="caller", callee="risky");
-    root spawn main.AddCallEdge(caller="caller", callee="safe");
+    for callee in ["risky", "partial", "safe"] {
+        root spawn main.AddCallEdge(caller="caller", callee=callee);
+    }
 }
 
 
-test "flags uncovered functions that are called" {
+test "flags called functions with untested lines, fully untested first" {
     build_sample_graph();
     findings = (root spawn main.RiskyUncovered()).reports[0]["findings"] as list[dict[str, any]];
-    assert len(findings) == 1, f"expected only 'risky', got {findings}";
-    assert findings[0]["function"] == "risky";
+    assert [f["function"] for f in findings] == ["risky", "partial"], f"got {findings}";
+    assert findings[0]["fully_untested"] == True;
     assert findings[0]["called_by_count"] == 1;
+}
+
+
+test "partly tested functions report how much is untested" {
+    build_sample_graph();
+    findings = (root spawn main.RiskyUncovered()).reports[0]["findings"] as list[dict[str, any]];
+    partial = [f for f in findings if f["function"] == "partial"][0];
+    assert partial["fully_untested"] == False, "1 of 4 lines untested is not 'fully untested'";
+    assert partial["untested_lines"] == 1;
+    assert partial["total_lines"] == 4;
 }
 
 
@@ -70,7 +86,7 @@ test "narration returns Gemini's summary and priority" {
     out = (root spawn main.NarratedRiskReport()).reports[0];
     assert out["summary"] == "Test risky() first.";
     assert out["priority"] == "high";
-    assert len(out["findings"] as list) == 1;
+    assert len(out["findings"] as list) == 2;
 }
 
 
@@ -81,7 +97,7 @@ test "narration falls back safely when Gemini fails" {
     out = (root spawn main.NarratedRiskReport()).reports[0];
     assert out["summary"].startswith("Narration unavailable");
     assert out["priority"] == "unknown";
-    assert len(out["findings"] as list) == 1, "findings must still come back";
+    assert len(out["findings"] as list) == 2, "findings must still come back";
 }
 
 
@@ -101,8 +117,10 @@ test "scanner finds functions, methods, calls and coverage" {
             "def a():\n    b()\n\ndef b():\n    return 1\n\nclass C:\n    def c(self):\n        self.a()\n"
         );
         (repo / "src" / "broken.py").write_text("def oops(:\n");
-        # Lines 4-5 (function b) never ran in tests.
-        coverage = {"files": {"src/m.py": {"missing_lines": [4, 5]}}};
+        # Only b's body (line 5) never ran; `def` lines always run on import.
+        coverage = {"files": {"src/m.py": {
+            "executed_lines": [1, 2, 4, 7, 8, 9], "missing_lines": [5]
+        }}};
 
         (records, edges) = scanner.collect(repo, coverage, "src/**/*.py");
         by_name = {r["qualified_name"]: r for r in records};
@@ -110,7 +128,70 @@ test "scanner finds functions, methods, calls and coverage" {
         assert set(by_name.keys()) == {"src.m.a", "src.m.b", "src.m.C.c"}, "broken.py should be skipped";
         assert by_name["src.m.a"]["covered"] == True;
         assert by_name["src.m.b"]["covered"] == False;
+        assert by_name["src.m.b"]["untested_lines"] == 1, "the def line must not count";
+        assert by_name["src.m.b"]["total_lines"] == 1;
         assert ("src.m.a", "src.m.b") in edges;
         assert ("src.m.C.c", "src.m.a") in edges;
     }
+}
+
+
+test "BuildGraph builds the same graph as adding one by one" {
+    fresh_graph();
+    root spawn main.BuildGraph(
+        functions=[
+            {"qualified_name": "caller", "file_path": "m.py", "covered": True,
+             "untested_lines": 0, "total_lines": 3, "last_editor": "Ada"},
+            {"qualified_name": "risky", "file_path": "m.py", "covered": False,
+             "untested_lines": 2, "total_lines": 2, "last_editor": "Ada"},
+            {"qualified_name": "risky", "file_path": "m.py", "covered": False,
+             "untested_lines": 2, "total_lines": 2, "last_editor": "Ada"},
+        ],
+        calls=[("caller", "risky"), ("caller", "missing")],
+    );
+    assert len([root-->][?:main.Function]) == 2, "duplicate names become one node";
+    findings = (root spawn main.RiskyUncovered()).reports[0]["findings"] as list[dict[str, any]];
+    assert [f["function"] for f in findings] == ["risky"];
+}
+
+
+"""Scan one made-up Python file and return its (records by name, edges)."""
+def scan_source(
+    source: str, missing: list[int]
+) -> tuple[dict[str, dict[str, str | bool | int]], list[tuple[str, str]]] {
+    with tempfile.TemporaryDirectory() as tmp {
+        repo = Path(str(tmp)).resolve();
+        (repo / "m.py").write_text(source);
+        lines = list(range(1, len(source.splitlines()) + 1));
+        coverage = {"files": {"m.py": {
+            "executed_lines": [n for n in lines if n not in missing], "missing_lines": missing
+        }}};
+        (records, edges) = scanner.collect(repo, coverage, "*.py");
+        return ({str(r["qualified_name"]): r for r in records}, edges);
+    }
+}
+
+
+test "overloaded functions are judged by their real body" {
+    # Lines 1-4 are @overload type stubs; lines 6-7 are the real function.
+    source = "@overload\ndef f(x: int) -> int: ...\n@overload\ndef f(x: str) -> str: ...\n\ndef f(x):\n    return x\n";
+    (by_name, _) = scan_source(source, [7]);
+    assert len(by_name) == 1;
+    assert by_name["m.f"]["untested_lines"] == 1, "must use the real body, not a stub";
+    assert by_name["m.f"]["total_lines"] == 1;
+}
+
+
+test "self.method() links only to the same class's method" {
+    source = "class A:\n    def run(self):\n        self.save()\n    def save(self):\n        pass\n\nclass B:\n    def save(self):\n        pass\n";
+    (_, edges) = scan_source(source, []);
+    assert ("m.A.run", "m.A.save") in edges;
+    assert ("m.A.run", "m.B.save") not in edges, "B.save is a different method";
+}
+
+
+test "calls to special methods like __init__ are not matched by name" {
+    source = "class A:\n    def __init__(self):\n        pass\n\nclass B(A):\n    def __init__(self):\n        super().__init__()\n";
+    (_, edges) = scan_source(source, []);
+    assert edges == [], f"super().__init__() should not link to every __init__, got {edges}";
 }
