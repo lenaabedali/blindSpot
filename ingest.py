@@ -36,6 +36,11 @@ def _load_graph():
             sys.path.insert(0, str(HERE))
         with contextlib.redirect_stdout(sys.stderr):
             import jaclang  # noqa: F401  (lets Python import .jac files)
+            # Load Jac's serializer BEFORE our .jac modules: it registers
+            # node/edge classes as they're created, and an unregistered
+            # class can't be read back from Jac's store ("Refused to
+            # deserialize unregistered class: main.Function").
+            import jaclang.runtimelib.serializer  # noqa: F401
             from jaclang.lib import destroy, refs, root, spawn
             import main as graph  # main.sv.jac
             import scanner  # scanner.jac
@@ -59,7 +64,12 @@ def scan(repo_path: str, coverage_json: str, src_glob: str = "src/**/*.py",
     if Path(src_glob).is_absolute() or ".." in Path(src_glob).parts:
         raise ValueError("src_glob must stay inside the repo (no '..' or absolute paths)")
 
-    coverage_data = json.loads(coverage_path.read_text())
+    try:
+        coverage_data = json.loads(coverage_path.read_text())
+    except (ValueError, UnicodeDecodeError):
+        raise ValueError(f"Not a valid coverage JSON file: {coverage_path}") from None
+    if not isinstance(coverage_data, dict) or not isinstance(coverage_data.get("files"), dict):
+        raise ValueError(f"Not a coverage.py JSON report (run `coverage json`): {coverage_path}")
     graph, scanner, root, spawn, destroy, refs = _load_graph()
     records, edges = scanner.collect(repo, coverage_data, src_glob)
 
@@ -70,12 +80,12 @@ def scan(repo_path: str, coverage_json: str, src_glob: str = "src/**/*.py",
         old = [n for n in refs(r) if isinstance(n, graph.Function)]
         if old:
             destroy(old)  # start every scan from an empty graph
-        for rec in records:
-            spawn(graph.AddFunction(**rec), r)
-        for caller, callee in edges:
-            spawn(graph.AddCallEdge(caller=caller, callee=callee), r)
+        spawn(graph.BuildGraph(functions=records, calls=edges), r)
         walker = graph.NarratedRiskReport() if narrate else graph.RiskyUncovered()
         reports = spawn(walker, r).reports
+        # Delete the graph once we have the report, so Jac's store in
+        # .jac/data doesn't keep every old scan around.
+        destroy([n for n in refs(r) if isinstance(n, graph.Function)])
 
     result = dict(reports[0]) if reports else {"findings": []}
     result["functions_scanned"] = len(records)
