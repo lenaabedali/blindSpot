@@ -7,7 +7,7 @@ it checks the inputs, runs both in this one process, and provides the
 CLI. There is no server and no network port involved.
 
 Usage (prints the findings as JSON):
-    python ingest.py <repo_path> <coverage_json_path> [--src-glob GLOB] [--narrate]
+    python ingest.py <repo_path> <coverage_json_path> [--src-glob GLOB] [--narrate | --triage]
 """
 import argparse
 import contextlib
@@ -49,7 +49,7 @@ def _load_graph():
 
 
 def scan(repo_path: str, coverage_json: str, src_glob: str = "src/**/*.py",
-         narrate: bool = False) -> dict:
+         narrate: bool = False, triage: bool = False) -> dict:
     """Build a fresh graph for one repo and return the walker's report."""
     repo = (ORIGINAL_CWD / repo_path).resolve()
     coverage_path = (ORIGINAL_CWD / coverage_json).resolve()
@@ -81,7 +81,12 @@ def scan(repo_path: str, coverage_json: str, src_glob: str = "src/**/*.py",
         if old:
             destroy(old)  # start every scan from an empty graph
         spawn(graph.BuildGraph(functions=records, calls=edges), r)
-        walker = graph.NarratedRiskReport() if narrate else graph.RiskyUncovered()
+        if triage:
+            walker = graph.TriageRisks(sources=scanner.collect_sources(repo, src_glob))
+        elif narrate:
+            walker = graph.NarratedRiskReport()
+        else:
+            walker = graph.RiskyUncovered()
         reports = spawn(walker, r).reports
         # Delete the graph once we have the report, so Jac's store in
         # .jac/data doesn't keep every old scan around.
@@ -99,10 +104,14 @@ def main():
     parser.add_argument("coverage_json")
     parser.add_argument("--src-glob", default="src/**/*.py",
                         help="glob (relative to repo) for files to scan")
-    parser.add_argument("--narrate", action="store_true",
-                        help="also ask Gemini for a review comment (needs your own gcloud auth)")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--narrate", action="store_true",
+                      help="also ask Gemini for a review comment (needs your own gcloud auth)")
+    mode.add_argument("--triage", action="store_true",
+                      help="have a Gemini agent read the risky functions and rank them (needs gcloud auth)")
     args = parser.parse_args()
-    print(json.dumps(scan(args.repo_path, args.coverage_json, args.src_glob, args.narrate), indent=2))
+    print(json.dumps(scan(args.repo_path, args.coverage_json, args.src_glob,
+                          narrate=args.narrate, triage=args.triage), indent=2))
 
 
 if __name__ == "__main__":
