@@ -121,6 +121,11 @@ a prioritized, human-readable code-review comment instead of bare JSON.
 `RiskyUncovered` itself needs no credentials at all — this layer is opt-in
 on top of it.
 
+**Cost:** the core scan (`find_risky_uncovered_functions`, and `ingest.py`
+without flags) is free and needs no Google account. Narration and triage
+call Gemini on Vertex AI, which needs a Google Cloud project with **billing
+enabled or credits** attached. A scan costs a fraction of a cent.
+
 **Bring your own credentials.** No API key lives in this repo, ever.
 Narration uses the Google Cloud login of whoever runs BlindSpot, on their
 own machine, via Application Default Credentials — nothing is read from
